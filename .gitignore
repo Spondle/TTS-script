@@ -1,0 +1,19 @@
+# Input & Output
+input.txt
+*.wav
+output_piper.wav
+
+# Models
+*.onnx
+
+# Python / Virtual Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
