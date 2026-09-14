@@ -193,7 +193,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-t", "--text", help="Text string to speak directly")
-    parser.add_argument("-f", "--file", help="Path to input text file", default="input.txt")
+    parser.add_argument("-f", "--file", help="Path to input text file (or '-' for stdin)", default="input.txt")
     parser.add_argument("-o", "--output", help="Output WAV path", default="output_piper.wav")
     parser.add_argument(
         "-m",
@@ -212,13 +212,13 @@ def main():
     text = ""
     if args.text:
         text = args.text
-    elif not sys.stdin.isatty():
+    elif args.file == "-":
         text = sys.stdin.read()
     else:
         input_path = Path(args.file)
         if not input_path.exists():
             print(f"Error: Input text file '{input_path}' not found.", file=sys.stderr)
-            print("Provide text via -t \"hello\", pipe via stdin, or create input.txt.", file=sys.stderr)
+            print("Provide text via -t \"hello\", -f <path>, or create input.txt.", file=sys.stderr)
             sys.exit(1)
         text = input_path.read_text(encoding="utf-8")
 
