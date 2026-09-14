@@ -1,10 +1,19 @@
-import argparse
 import os
-import re
 import sys
+from pathlib import Path
+
+# Automatically re-execute inside the project's .venv if run with system python
+_venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+if _venv_python.exists() and sys.executable != str(_venv_python):
+    try:
+        import piper  # noqa: F401
+    except ImportError:
+        os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
+
+import argparse
+import re
 import urllib.request
 import wave
-from pathlib import Path
 from tqdm import tqdm
 
 from piper.config import SynthesisConfig
