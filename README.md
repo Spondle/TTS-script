@@ -4,7 +4,7 @@ Fast local neural text-to-speech using Piper TTS with automatic Hugging Face mod
 
 ---
 
-## 🚀 Quick Start: Synthesizing `input.txt`
+## Quick Start: Synthesizing `input.txt`
 
 ### Option 1: In PyCharm
 1. Open [`input.txt`](input.txt) and paste your text.
@@ -29,7 +29,7 @@ The script will synthesize the contents of [`input.txt`](input.txt) and output [
 
 ---
 
-## 🛠️ Usage Options & Examples
+## Usage Options & Examples
 
 ### 1. Read from a Different File or Change Output
 ```bash
@@ -62,7 +62,7 @@ python main.py -f input.txt --speed 1.15 --pause 0.1
 
 ---
 
-## ⚙️ Command-Line Arguments Reference
+## Command-Line Arguments Reference
 
 | Argument | Short | Default | Description |
 | :--- | :--- | :--- | :--- |
