@@ -1,20 +1,22 @@
+#!/usr/bin/env python3
+import argparse
 import os
+import re
 import sys
+import urllib.request
+import wave
 from pathlib import Path
+from tqdm import tqdm
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Automatically re-execute inside the project's .venv if run with system python
-_venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+_venv_python = SCRIPT_DIR / ".venv" / "bin" / "python"
 if _venv_python.exists() and sys.executable != str(_venv_python):
     try:
         import piper  # noqa: F401
     except ImportError:
         os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
-
-import argparse
-import re
-import urllib.request
-import wave
-from tqdm import tqdm
 
 from piper.config import SynthesisConfig
 from piper.voice import PiperVoice
@@ -63,47 +65,59 @@ def download_with_progress(url: str, dest_path: Path) -> None:
 
 
 def ensure_model_files(model_input: str, config_input: str | None = None) -> tuple[Path, Path]:
-    """Ensures both the .onnx model and .onnx.json config exist locally, downloading if necessary."""
-    # Determine paths
-    model_path = Path(model_input if model_input.endswith(".onnx") else f"{model_input}.onnx")
-    config_path = Path(config_input) if config_input else Path(f"{model_path}.json")
+    """Ensures both the .onnx model and .onnx.json config exist locally, downloading if necessary.
+    
+    Checks current directory first, then the centralized script directory so models are shared.
+    """
+    raw_name = model_input if model_input.endswith(".onnx") else f"{model_input}.onnx"
+    local_path = Path(raw_name)
+    local_config = Path(config_input) if config_input else Path(f"{local_path}.json")
 
-    # If both files exist locally, we are ready
-    if model_path.exists() and config_path.exists():
-        return model_path, config_path
+    # 1. If explicit relative/absolute path exists locally
+    if local_path.exists() and local_config.exists():
+        return local_path, local_config
 
-    # Check if we can download from HuggingFace
-    urls = get_huggingface_urls(model_path.name)
+    # 2. Check in centralized script directory so models can be reused from any terminal location
+    script_model = SCRIPT_DIR / local_path.name
+    script_config = Path(config_input) if config_input else SCRIPT_DIR / f"{script_model.name}.json"
+    if script_model.exists() and script_config.exists():
+        return script_model, script_config
+
+    # 3. If neither exists, determine destination (centralized script directory if name only)
+    dest_model = local_path if ("/" in model_input or "\\" in model_input) else script_model
+    dest_config = local_config if ("/" in model_input or "\\" in model_input) else script_config
+
+    urls = get_huggingface_urls(dest_model.name)
     if not urls:
-        if not model_path.exists():
-            print(f"Error: Model file not found at '{model_path}' and couldn't parse HuggingFace URL.", file=sys.stderr)
+        if not dest_model.exists():
+            print(f"Error: Model file not found at '{dest_model}' and couldn't parse HuggingFace URL.", file=sys.stderr)
             sys.exit(1)
-        if not config_path.exists():
-            print(f"Error: Config file not found at '{config_path}'.", file=sys.stderr)
+        if not dest_config.exists():
+            print(f"Error: Config file not found at '{dest_config}'.", file=sys.stderr)
             sys.exit(1)
-        return model_path, config_path
+        return dest_model, dest_config
 
     onnx_url, json_url = urls
 
     # Download ONNX if missing
-    if not model_path.exists():
-        print(f"Model '{model_path.name}' not found locally. Downloading from Hugging Face...")
+    if not dest_model.exists():
+        print(f"Model '{dest_model.name}' not found locally. Downloading from Hugging Face...")
         try:
-            download_with_progress(onnx_url, model_path)
+            download_with_progress(onnx_url, dest_model)
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
 
     # Download JSON config if missing
-    if not config_path.exists():
-        print(f"Config '{config_path.name}' not found locally. Downloading from Hugging Face...")
+    if not dest_config.exists():
+        print(f"Config '{dest_config.name}' not found locally. Downloading from Hugging Face...")
         try:
-            download_with_progress(json_url, config_path)
+            download_with_progress(json_url, dest_config)
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
 
-    return model_path, config_path
+    return dest_model, dest_config
 
 
 def split_text_into_chunks(text: str, max_chunk_chars: int = 1500) -> list[str]:
@@ -202,7 +216,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-t", "--text", help="Text string to speak directly")
-    parser.add_argument("-f", "--file", help="Path to input text file (or '-' for stdin)", default="input.txt")
+    parser.add_argument("-f", "--file", help="Path to input text file (or '-' for stdin)", default=None)
     parser.add_argument("-o", "--output", help="Output WAV path", default="output_piper.wav")
     parser.add_argument(
         "-m",
@@ -224,12 +238,24 @@ def main():
     elif args.file == "-":
         text = sys.stdin.read()
     else:
-        input_path = Path(args.file)
-        if not input_path.exists():
-            print(f"Error: Input text file '{input_path}' not found.", file=sys.stderr)
-            print("Provide text via -t \"hello\", -f <path>, or create input.txt.", file=sys.stderr)
-            sys.exit(1)
-        text = input_path.read_text(encoding="utf-8")
+        # If user explicitly passed -f <file>
+        if args.file:
+            input_path = Path(args.file)
+            if not input_path.exists():
+                print(f"Error: Input text file '{input_path}' not found.", file=sys.stderr)
+                sys.exit(1)
+            text = input_path.read_text(encoding="utf-8")
+        else:
+            # Default to input.txt in current working dir or project dir if present
+            default_file = Path("input.txt")
+            if not default_file.exists() and (SCRIPT_DIR / "input.txt").exists():
+                default_file = SCRIPT_DIR / "input.txt"
+            if default_file.exists():
+                text = default_file.read_text(encoding="utf-8")
+            else:
+                print("Error: No text input provided.", file=sys.stderr)
+                print("Provide text via: tts -t \"your text\", or tts -f <filename>, or create input.txt.", file=sys.stderr)
+                sys.exit(1)
 
     text = text.strip()
     if not text:

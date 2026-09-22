@@ -4,6 +4,23 @@ Fast local neural text-to-speech using Piper TTS with automatic Hugging Face mod
 
 ---
 
+## Run Anywhere via Terminal (`tts`)
+
+A `tts` command is installed in your user path (`~/.local/bin/tts`), so you can run it from any directory without manually activating the virtual environment:
+
+```bash
+# Speak text directly
+tts -t "Hello world"
+
+# Read any text file and specify output
+tts -f my_document.txt -o audio.wav
+
+# Use Ryan's voice with 15% faster speed
+tts -f my_document.txt -m en_US-ryan-medium --speed 1.15
+```
+
+---
+
 ## Quick Start: Synthesizing `input.txt`
 
 ### Option 1: In PyCharm
@@ -15,13 +32,10 @@ Fast local neural text-to-speech using Piper TTS with automatic Hugging Face mod
 
 ### Option 2: In Terminal
 
-Activate your virtual environment and run `main.py`:
+From the project directory:
 
 ```bash
-# 1. Activate the virtual environment
-source .venv/bin/activate
-
-# 2. Run the script (reads input.txt by default)
+# Run directly (reads input.txt by default)
 python main.py
 ```
 
@@ -33,31 +47,31 @@ The script will synthesize the contents of [`input.txt`](input.txt) and output [
 
 ### 1. Read from a Different File or Change Output
 ```bash
-python main.py -f chapter1.txt -o chapter1.wav
+tts -f chapter1.txt -o chapter1.wav
 ```
 
 ### 2. Pass Text Directly in the Command Line
 ```bash
-python main.py -t "Hello! This is a test."
+tts -t "Hello! This is a test."
 ```
 
 ### 3. Change Voice Models (Auto-Downloaded from Hugging Face)
 If you don't have the model locally, it will automatically download it on first run:
 ```bash
 # Ryan (Fast, warm male voice - recommended for long audiobooks)
-python main.py -f input.txt -m en_US-ryan-medium -o ryan.wav
+tts -f input.txt -m en_US-ryan-medium -o ryan.wav
 
 # Amy (Clear, natural female voice)
-python main.py -f input.txt -m en_US-amy-medium -o amy.wav
+tts -f input.txt -m en_US-amy-medium -o amy.wav
 
 # Bryce (Dynamic conversational male voice)
-python main.py -f input.txt -m en_US-bryce-medium -o bryce.wav
+tts -f input.txt -m en_US-bryce-medium -o bryce.wav
 ```
 
 ### 4. Adjust Speed and Sentence Pauses
 ```bash
 # 15% faster speech rate with 0.1s silence between sentences
-python main.py -f input.txt --speed 1.15 --pause 0.1
+tts -f input.txt --speed 1.15 --pause 0.1
 ```
 
 ---
