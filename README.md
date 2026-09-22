@@ -8,7 +8,7 @@ Fast local neural text-to-speech using Piper TTS with automatic Hugging Face mod
 
 1. **Clone the repository and install dependencies:**
    ```bash
-   git clone <repo-url>
+   git clone https://github.com/Spondle/TTS-script.git
    cd TTS-script
    python3 -m venv .venv
    source .venv/bin/activate
@@ -107,3 +107,9 @@ tts -f input.txt --speed 1.15 --pause 0.1
 | `--speed` | | `1.0` | Speed multiplier (e.g. `1.15` for 15% faster) |
 | `--pause` | | `0.2` | Seconds of silence between sentences |
 | `--speaker` | | `None` | Speaker ID (for multi-speaker models) |
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
