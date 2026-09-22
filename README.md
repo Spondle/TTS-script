@@ -4,9 +4,29 @@ Fast local neural text-to-speech using Piper TTS with automatic Hugging Face mod
 
 ---
 
+## Installation & Setup
+
+1. **Clone the repository and install dependencies:**
+   ```bash
+   git clone <repo-url>
+   cd TTS-script
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Enable global `tts` terminal command (optional):**
+   Run the installer once to link `tts` into your `~/.local/bin`:
+   ```bash
+   ./install.sh
+   ```
+   *(Ensure `~/.local/bin` is in your `$PATH` if it isn't already).*
+
+---
+
 ## Run Anywhere via Terminal (`tts`)
 
-A `tts` command is installed in your user path (`~/.local/bin/tts`), so you can run it from any directory without manually activating the virtual environment:
+Once installed, you can run `tts` from **any directory** without needing to activate the virtual environment manually:
 
 ```bash
 # Speak text directly
