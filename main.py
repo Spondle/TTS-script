@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
+import json
 import os
 import re
 import sys
 import urllib.request
 import wave
 from pathlib import Path
+
+import numpy as np
+import onnxruntime as ort
 from tqdm import tqdm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -18,7 +23,7 @@ if _venv_python.exists() and sys.executable != str(_venv_python):
     except ImportError:
         os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
 
-from piper.config import SynthesisConfig
+from piper.config import PiperConfig, SynthesisConfig
 from piper.voice import PiperVoice
 
 # HuggingFace repository base for Piper voices
@@ -120,56 +125,146 @@ def ensure_model_files(model_input: str, config_input: str | None = None) -> tup
     return dest_model, dest_config
 
 
-def split_text_into_chunks(text: str, max_chunk_chars: int = 1500) -> list[str]:
-    """Splits long text into manageable paragraph/sentence chunks for streaming synthesis."""
-    # First, split by paragraphs
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    chunks = []
+def resolve_providers(device: str) -> list[str | tuple[str, dict]]:
+    """Resolves ONNX Runtime execution providers based on requested device."""
+    available = set(ort.get_available_providers())
+    dev = device.lower()
 
-    for para in paragraphs:
-        if len(para) <= max_chunk_chars:
-            chunks.append(para)
+    if dev == "cuda" or (dev == "auto" and "CUDAExecutionProvider" in available):
+        if "CUDAExecutionProvider" not in available:
+            print("Warning: CUDAExecutionProvider not available, falling back to CPU.", file=sys.stderr)
         else:
-            # Sub-split paragraph by sentences if too large
-            sentences = re.split(r"(?<=[.!?])\s+", para)
-            current_chunk = []
-            current_len = 0
-            for sentence in sentences:
-                if current_len + len(sentence) > max_chunk_chars and current_chunk:
-                    chunks.append(" ".join(current_chunk))
-                    current_chunk = [sentence]
-                    current_len = len(sentence)
-                else:
-                    current_chunk.append(sentence)
-                    current_len += len(sentence) + 1
-            if current_chunk:
-                chunks.append(" ".join(current_chunk))
+            return [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
 
-    return chunks if chunks else [text]
+    if dev == "openvino" or (dev == "auto" and "OpenVINOExecutionProvider" in available):
+        if "OpenVINOExecutionProvider" not in available:
+            print("Warning: OpenVINOExecutionProvider not available, falling back to CPU.", file=sys.stderr)
+        else:
+            return ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+
+    return ["CPUExecutionProvider"]
+
+
+def load_optimized_voice(
+    model_path: Path,
+    config_path: Path,
+    device: str = "auto",
+    workers: int = 1,
+) -> PiperVoice:
+    """Loads a single thread-safe PiperVoice session with ORT graph optimizations."""
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_dict = json.load(f)
+
+    cpu_count = os.cpu_count() or 4
+    sess_options = ort.SessionOptions()
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    sess_options.intra_op_num_threads = max(1, cpu_count // max(1, workers))
+    sess_options.inter_op_num_threads = 1
+    sess_options.enable_cpu_mem_arena = True
+    sess_options.enable_mem_pattern = True
+
+    providers = resolve_providers(device)
+    session = ort.InferenceSession(
+        str(model_path),
+        sess_options=sess_options,
+        providers=providers,
+    )
+    return PiperVoice(
+        config=PiperConfig.from_dict(config_dict),
+        session=session,
+    )
+
+
+def extract_sentence_phoneme_ids(voice: PiperVoice, text: str) -> list[list[int]]:
+    """Splits text by paragraphs and uses Espeak to extract per-sentence phoneme IDs."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+
+    sentence_batches: list[list[int]] = []
+    for para in paragraphs:
+        for phonemes in voice.phonemize(para):
+            if phonemes:
+                sentence_batches.append(voice.phonemes_to_ids(phonemes))
+    return sentence_batches
+
+
+def _synthesize_sentence_pcm(
+    voice: PiperVoice,
+    phoneme_ids: list[int],
+    syn_config: SynthesisConfig,
+) -> bytes:
+    """Runs thread-safe ORT inference and fused float32 -> int16 PCM conversion."""
+    audio = voice.phoneme_ids_to_audio(phoneme_ids, syn_config=syn_config)
+    if isinstance(audio, tuple):
+        audio = audio[0]
+
+    if audio.size == 0:
+        return b""
+
+    if syn_config.normalize_audio:
+        max_val = float(np.max(np.abs(audio)))
+        if max_val < 1e-8:
+            return bytes(audio.size * 2)
+        scale = (32767.0 * syn_config.volume) / max_val
+    else:
+        scale = 32767.0 * syn_config.volume
+
+    return np.clip(audio * scale, -32767.0, 32767.0).astype(np.int16).tobytes()
 
 
 def synthesize_speech(
     text: str,
     output_path: str = "output_piper.wav",
-    model_path: str = "en_US-lessac-high.onnx",
+    model_path: str = "en_US-ryan-medium.onnx",
     config_path: str | None = None,
     speaker_id: int | None = None,
     length_scale: float = 1.0,      # Speech rate (<1.0 faster, >1.0 slower)
     noise_scale: float = 0.667,     # Phoneme variation
     noise_w: float = 0.8,           # Cadence variation
     sentence_silence: float = 0.2,  # Pause between sentences (seconds)
+    workers: int | None = None,     # Concurrency count
+    device: str = "auto",           # Hardware execution provider
 ) -> None:
-    """Synthesizes text (including very long texts) to a WAV file using Piper TTS."""
+    """Synthesizes text to a WAV file using parallel Piper TTS with thread-safe inference."""
     resolved_model, resolved_config = ensure_model_files(model_path, config_path)
 
-    # Load Piper voice model
+    cpu_count = os.cpu_count() or 4
+    if workers is None or workers <= 0:
+        workers = min(4, cpu_count)
+
+    # Load thread-safe Piper voice model
     try:
-        voice = PiperVoice.load(str(resolved_model), config_path=str(resolved_config))
+        voice = load_optimized_voice(
+            model_path=resolved_model,
+            config_path=resolved_config,
+            device=device,
+            workers=workers,
+        )
     except Exception as e:
         print(f"Error loading voice model: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Loaded voice model: {resolved_model.name} (Sample rate: {voice.config.sample_rate} Hz)")
+    active_provider = voice.session.get_providers()[0]
+    print(
+        f"Loaded voice model: {resolved_model.name} "
+        f"(Sample rate: {voice.config.sample_rate} Hz, Provider: {active_provider})"
+    )
+
+    # Extract sentences and phoneme batches
+    sentence_batches = extract_sentence_phoneme_ids(voice, text)
+    total_sentences = len(sentence_batches)
+    if total_sentences == 0:
+        print("Error: No synthesizeable sentences found in input text.", file=sys.stderr)
+        sys.exit(1)
+
+    effective_workers = min(workers, total_sentences)
+    total_phonemes = sum(len(b) for b in sentence_batches)
+    print(
+        f"Prepared {total_sentences} sentences ({total_phonemes:,} phoneme IDs). "
+        f"Synthesizing with {effective_workers} worker thread(s)..."
+    )
 
     # Configure synthesis parameters
     syn_config = SynthesisConfig(
@@ -179,13 +274,22 @@ def synthesize_speech(
         noise_w_scale=noise_w,
     )
 
-    # Split text into chunks for streaming synthesis and progress reporting
-    chunks = split_text_into_chunks(text)
-    total_chars = sum(len(c) for c in chunks)
-    print(f"Total characters: {total_chars:,} across {len(chunks)} chunks.")
+    # Silence padding between sentences
+    silence_samples = max(0, int(voice.config.sample_rate * sentence_silence))
+    silence_bytes = b"\x00\x00" * silence_samples if silence_samples > 0 else b""
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Longest-Job-First (LJF) to balance load and prevent tail latency stragglers
+    sorted_jobs = sorted(
+        enumerate(sentence_batches),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+
+    completed: dict[int, bytes] = {}
+    next_write_idx = 0
 
     try:
         with wave.open(str(output_file), "wb") as wav_file:
@@ -194,15 +298,29 @@ def synthesize_speech(
             wav_file.setframerate(voice.config.sample_rate)
 
             with tqdm(
-                total=len(chunks),
+                total=total_sentences,
                 desc="Synthesizing audio",
-                unit="chunk",
+                unit="sentence",
                 dynamic_ncols=True,
             ) as progress:
-                for chunk in chunks:
-                    for audio_chunk in voice.synthesize(chunk, syn_config=syn_config):
-                        wav_file.writeframes(audio_chunk.audio_int16_bytes)
-                    progress.update(1)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            _synthesize_sentence_pcm, voice, pids, syn_config
+                        ): idx
+                        for idx, pids in sorted_jobs
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        idx = futures[future]
+                        completed[idx] = future.result()
+                        progress.update(1)
+
+                        # Write buffered chunks in strict sequential order
+                        while next_write_idx in completed:
+                            wav_file.writeframes(completed.pop(next_write_idx))
+                            if silence_bytes and next_write_idx < total_sentences - 1:
+                                wav_file.writeframes(silence_bytes)
+                            next_write_idx += 1
 
         print(f"Done! Audio successfully saved to: {output_file.resolve()}")
     except Exception as e:
@@ -221,13 +339,26 @@ def main():
     parser.add_argument(
         "-m",
         "--model",
-        help="Voice model name or .onnx path (e.g., en_US-lessac-high, en_US-ryan-medium, en_US-amy-medium)",
-        default="en_US-lessac-high.onnx",
+        help="Voice model name or .onnx path (e.g., en_US-ryan-medium, en_US-lessac-high, en_US-amy-medium)",
+        default="en_US-ryan-medium.onnx",
     )
     parser.add_argument("-c", "--config", help="Path to model config .json (optional)", default=None)
     parser.add_argument("--speaker", type=int, default=None, help="Speaker ID (for multi-speaker models)")
     parser.add_argument("--speed", type=float, default=1.0, help="Speech speed multiplier (e.g. 1.2 for faster)")
     parser.add_argument("--pause", type=float, default=0.2, help="Silence between sentences in seconds")
+    parser.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="Number of parallel synthesis worker threads",
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda", "openvino"],
+        default="auto",
+        help="ONNX Runtime execution provider device",
+    )
 
     args = parser.parse_args()
 
@@ -273,6 +404,8 @@ def main():
         speaker_id=args.speaker,
         length_scale=length_scale,
         sentence_silence=args.pause,
+        workers=args.workers,
+        device=args.device,
     )
 
 

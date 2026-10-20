@@ -88,10 +88,13 @@ tts -f input.txt -m en_US-amy-medium -o amy.wav
 tts -f input.txt -m en_US-bryce-medium -o bryce.wav
 ```
 
-### 4. Adjust Speed and Sentence Pauses
+### 4. Adjust Speed, Sentence Pauses, and Parallel Workers
 ```bash
-# 15% faster speech rate with 0.1s silence between sentences
-tts -f input.txt --speed 1.15 --pause 0.1
+# 15% faster speech rate with 0.1s silence between sentences and 4 parallel worker threads
+tts -f input.txt --speed 1.15 --pause 0.1 --workers 4
+
+# Run with specific hardware execution provider (auto, cpu, cuda, openvino)
+tts -f input.txt --device auto
 ```
 
 ---
@@ -103,9 +106,11 @@ tts -f input.txt --speed 1.15 --pause 0.1
 | `--file` | `-f` | `input.txt` | Path to the input text file (or `-` for stdin) |
 | `--output` | `-o` | `output_piper.wav` | Output `.wav` audio destination |
 | `--text` | `-t` | `None` | Text string to synthesize directly |
-| `--model` | `-m` | `en_US-lessac-high.onnx` | Voice model name or path |
+| `--model` | `-m` | `en_US-ryan-medium.onnx` | Voice model name or path |
 | `--speed` | | `1.0` | Speed multiplier (e.g. `1.15` for 15% faster) |
 | `--pause` | | `0.2` | Seconds of silence between sentences |
+| `--workers` | `-w` | `min(4, CPU count)` | Parallel worker threads for synthesis |
+| `--device` | | `auto` | ONNX Runtime provider (`auto`, `cpu`, `cuda`, `openvino`) |
 | `--speaker` | | `None` | Speaker ID (for multi-speaker models) |
 
 ---
