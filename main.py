@@ -9,22 +9,24 @@ import urllib.request
 import wave
 from pathlib import Path
 
-import numpy as np
-import onnxruntime as ort
-from tqdm import tqdm
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Automatically re-execute inside the project's .venv if run with system python
 _venv_python = SCRIPT_DIR / ".venv" / "bin" / "python"
 if _venv_python.exists() and sys.executable != str(_venv_python):
     try:
+        import numpy  # noqa: F401
+        import onnxruntime  # noqa: F401
         import piper  # noqa: F401
+        import tqdm  # noqa: F401
     except ImportError:
         os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
 
+import numpy as np
+import onnxruntime as ort
 from piper.config import PiperConfig, SynthesisConfig
 from piper.voice import PiperVoice
+from tqdm import tqdm
 
 # HuggingFace repository base for Piper voices
 HF_BASE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
@@ -147,14 +149,11 @@ def resolve_providers(device: str) -> list[str | tuple[str, dict]]:
 
 def load_optimized_voice(
     model_path: Path,
-    config_path: Path,
+    config: PiperConfig,
     device: str = "auto",
     workers: int = 1,
 ) -> PiperVoice:
     """Loads a single thread-safe PiperVoice session with ORT graph optimizations."""
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_dict = json.load(f)
-
     cpu_count = os.cpu_count() or 4
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -171,22 +170,24 @@ def load_optimized_voice(
         providers=providers,
     )
     return PiperVoice(
-        config=PiperConfig.from_dict(config_dict),
+        config=config,
         session=session,
     )
 
 
-def extract_sentence_phoneme_ids(voice: PiperVoice, text: str) -> list[list[int]]:
+def extract_sentence_phoneme_ids(config: PiperConfig, text: str) -> list[list[int]]:
     """Splits text by paragraphs and uses Espeak to extract per-sentence phoneme IDs."""
+    # Phonemization only requires PiperConfig (does not use the ONNX session)
+    dummy_voice = PiperVoice(config=config, session=None)  # type: ignore[arg-type]
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if not paragraphs:
         paragraphs = [text]
 
     sentence_batches: list[list[int]] = []
     for para in paragraphs:
-        for phonemes in voice.phonemize(para):
+        for phonemes in dummy_voice.phonemize(para):
             if phonemes:
-                sentence_batches.append(voice.phonemes_to_ids(phonemes))
+                sentence_batches.append(dummy_voice.phonemes_to_ids(phonemes))
     return sentence_batches
 
 
@@ -234,13 +235,30 @@ def synthesize_speech(
     if workers is None or workers <= 0:
         workers = min(4, cpu_count)
 
-    # Load thread-safe Piper voice model
+    # Load voice config and extract sentence phoneme batches first so thread count
+    # scales accurately when synthesizing only 1-3 sentences
+    try:
+        with open(resolved_config, "r", encoding="utf-8") as f:
+            voice_config = PiperConfig.from_dict(json.load(f))
+        sentence_batches = extract_sentence_phoneme_ids(voice_config, text)
+    except Exception as e:
+        print(f"Error preparing voice config or phonemizing text: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    total_sentences = len(sentence_batches)
+    if total_sentences == 0:
+        print("Error: No synthesizeable sentences found in input text.", file=sys.stderr)
+        sys.exit(1)
+
+    effective_workers = min(workers, total_sentences)
+
+    # Load thread-safe Piper voice model with intra_op_num_threads matched to effective_workers
     try:
         voice = load_optimized_voice(
             model_path=resolved_model,
-            config_path=resolved_config,
+            config=voice_config,
             device=device,
-            workers=workers,
+            workers=effective_workers,
         )
     except Exception as e:
         print(f"Error loading voice model: {e}", file=sys.stderr)
@@ -252,14 +270,6 @@ def synthesize_speech(
         f"(Sample rate: {voice.config.sample_rate} Hz, Provider: {active_provider})"
     )
 
-    # Extract sentences and phoneme batches
-    sentence_batches = extract_sentence_phoneme_ids(voice, text)
-    total_sentences = len(sentence_batches)
-    if total_sentences == 0:
-        print("Error: No synthesizeable sentences found in input text.", file=sys.stderr)
-        sys.exit(1)
-
-    effective_workers = min(workers, total_sentences)
     total_phonemes = sum(len(b) for b in sentence_batches)
     print(
         f"Prepared {total_sentences} sentences ({total_phonemes:,} phoneme IDs). "
@@ -281,12 +291,15 @@ def synthesize_speech(
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Longest-Job-First (LJF) to balance load and prevent tail latency stragglers
-    sorted_jobs = sorted(
-        enumerate(sentence_batches),
-        key=lambda item: len(item[1]),
-        reverse=True,
-    )
+    # Windowed Longest-Job-First (LJF) scheduling: prevents tail stragglers within each
+    # window while bounding in-memory out-of-order audio buffering for huge texts
+    window_size = max(16, effective_workers * 8)
+    indexed_batches = list(enumerate(sentence_batches))
+    scheduled_jobs: list[tuple[int, list[int]]] = []
+    for start in range(0, total_sentences, window_size):
+        window = indexed_batches[start : start + window_size]
+        window.sort(key=lambda item: len(item[1]), reverse=True)
+        scheduled_jobs.extend(window)
 
     completed: dict[int, bytes] = {}
     next_write_idx = 0
@@ -308,7 +321,7 @@ def synthesize_speech(
                         executor.submit(
                             _synthesize_sentence_pcm, voice, pids, syn_config
                         ): idx
-                        for idx, pids in sorted_jobs
+                        for idx, pids in scheduled_jobs
                     }
                     for future in concurrent.futures.as_completed(futures):
                         idx = futures[future]
